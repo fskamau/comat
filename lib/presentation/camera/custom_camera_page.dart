@@ -19,6 +19,12 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
   bool _isPermissionPermanentlyDenied = false;
   bool _isFlashOn = false;
 
+  // --- Zoom Variables ---
+  double _currentZoomLevel = 1.0;
+  double _minAvailableZoom = 1.0;
+  double _maxAvailableZoom = 1.0;
+  double _baseZoomLevel = 1.0;
+
   @override
   void initState() {
     super.initState();
@@ -45,7 +51,6 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
     }
   }
 
-  // Request camera permissions and initialize if granted
   Future<void> _checkPermissionsAndInitialize() async {
     final status = await Permission.camera.request();
     if (status.isGranted) {
@@ -58,7 +63,6 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
     }
   }
 
-  // Discover available cameras and initialize the back camera
   Future<void> _setupCameras() async {
     try {
       _cameras = await availableCameras();
@@ -74,7 +78,6 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
     }
   }
 
-  // Initialize the selected camera controller
   Future<void> _initCamera(CameraDescription cameraDescription) async {
     _controller = CameraController(
       cameraDescription,
@@ -85,6 +88,11 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
 
     try {
       await _controller!.initialize();
+
+      // --- Fetch Zoom Bounds ---
+      _minAvailableZoom = await _controller!.getMinZoomLevel();
+      _maxAvailableZoom = await _controller!.getMaxZoomLevel();
+
       await _controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
       await _controller!.setFlashMode(FlashMode.off);
 
@@ -96,7 +104,24 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
     }
   }
 
-  // Toggle flash/torch mode
+  // --- Zoom Logic ---
+  void _handleScaleStart(ScaleStartDetails details) {
+    _baseZoomLevel = _currentZoomLevel;
+  }
+
+  Future<void> _handleScaleUpdate(ScaleUpdateDetails details) async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+
+    // Calculate new zoom level based on scale gesture
+    double newZoomLevel = (_baseZoomLevel * details.scale).clamp(_minAvailableZoom, _maxAvailableZoom);
+
+    if (newZoomLevel != _currentZoomLevel) {
+      _currentZoomLevel = newZoomLevel;
+      await _controller!.setZoomLevel(_currentZoomLevel);
+      setState(() {});
+    }
+  }
+
   Future<void> _toggleFlash() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     try {
@@ -107,7 +132,6 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
     }
   }
 
-  // Capture a photo and return the file path
   Future<void> _takePicture() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     if (_controller!.value.isTakingPicture) return;
@@ -133,57 +157,94 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
       );
     }
 
-    // Calculate scaling to prevent preview distortion
-    final size = MediaQuery.of(context).size;
-    var scale = size.aspectRatio * _controller!.value.aspectRatio;
-    if (scale < 1) scale = 1 / scale;
-
+    // We are removing the manual scale calculation to avoid the "fake zoom" effect.
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          ClipRect(
-            child: Center(
-              child: Transform.scale(
-                scale: scale,
-                child: CameraPreview(_controller!),
+          // 1. PINCH-TO-ZOOM GESTURE DETECTOR
+          GestureDetector(
+            onScaleStart: _handleScaleStart,
+            onScaleUpdate: _handleScaleUpdate,
+            child: Container(
+              width: double.infinity,
+              height: double.infinity,
+              color: Colors.black,
+              child: Center(
+                // 2. ASPECT RATIO WRAPPER
+                // This ensures the preview looks exactly like the photo that will be saved.
+                child: AspectRatio(
+                  aspectRatio: 1 / _controller!.value.aspectRatio,
+                  child: CameraPreview(_controller!),
+                ),
               ),
             ),
           ),
-          Positioned(
-            top: 50,
-            left: 20,
-            right: 20,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white, size: 30),
-                  onPressed: () => Navigator.pop(context),
-                ),
-                IconButton(
-                  icon: Icon(
-                    _isFlashOn ? Icons.flash_on : Icons.flash_off,
-                    color: _isFlashOn ? AppTheme.mustGold : Colors.white,
-                    size: 30,
+
+          // 3. ZOOM LEVEL INDICATOR
+          if (_currentZoomLevel > 1.0)
+            Positioned(
+              bottom: 160,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(20),
                   ),
-                  onPressed: _toggleFlash,
+                  child: Text(
+                    "${_currentZoomLevel.toStringAsFixed(1)}x",
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                  ),
                 ),
-              ],
-            ),
-          ),
-          Positioned(
-            bottom: 40,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: GestureDetector(
-                onTap: _takePicture,
-                child: _buildCaptureButton(),
               ),
             ),
+
+          // UI OVERLAYS (Close, Flash, Capture)
+          _buildTopOverlay(),
+          _buildBottomOverlay(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTopOverlay() {
+    return Positioned(
+      top: 50,
+      left: 20,
+      right: 20,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.white, size: 30),
+            onPressed: () => Navigator.pop(context),
+          ),
+          IconButton(
+            icon: Icon(
+              _isFlashOn ? Icons.flash_on : Icons.flash_off,
+              color: _isFlashOn ? AppTheme.mustGold : Colors.white,
+              size: 30,
+            ),
+            onPressed: _toggleFlash,
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildBottomOverlay() {
+    return Positioned(
+      bottom: 40,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: GestureDetector(
+          onTap: _takePicture,
+          child: _buildCaptureButton(),
+        ),
       ),
     );
   }
@@ -205,7 +266,6 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
     );
   }
 
-  // UI for requesting camera permissions
   Widget _buildRequestPermissionState() {
     return Scaffold(
       backgroundColor: AppTheme.mustGreenBody,
@@ -233,7 +293,6 @@ class _CustomCameraPageState extends State<CustomCameraPage> with WidgetsBinding
     );
   }
 
-  // UI for when permissions are permanently denied
   Widget _buildPermissionDeniedState() {
     return Scaffold(
       backgroundColor: AppTheme.mustGreenBody,
